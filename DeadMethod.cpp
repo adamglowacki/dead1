@@ -14,7 +14,21 @@ typedef llvm::DenseSet<const CXXRecordDecl *> ClassesSet;
 
 
 class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
+  public:
+    DeclRemover(MethodSet *privateOnes) : unusedMethods(privateOnes) { }
 
+    bool VisitCallExpr(CallExpr *call) {
+      const CXXMemberCallExpr *memberCall = dyn_cast<CXXMemberCallExpr>(call);
+      const CXXMethodDecl *m;
+      if (!memberCall || !(m = memberCall->getMethodDecl())
+          || !(m = m->getCanonicalDecl()))
+        return true;
+
+      unusedMethods->erase(m);
+      return true;
+    }
+  private:
+    MethodSet *unusedMethods;
 };
 
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
@@ -45,12 +59,19 @@ class DeadConsumer : public ASTConsumer {
     virtual void HandleTranslationUnit(ASTContext &ctx) {
       MethodSet unusedPrivateMethods;
       ClassesSet undefinedClasses;
+      TranslationUnitDecl *tuDecl = ctx.getTranslationUnitDecl();
+
       /* gather lists of: all methods and the private ones only */
       DeclCollector collector(&undefinedClasses, &unusedPrivateMethods);
-      collector.TraverseDecl(ctx.getTranslationUnitDecl());
+      collector.TraverseDecl(tuDecl);
       llvm::errs() << "found " << undefinedClasses.size() << " undefined classes\n";
       llvm::errs() << "found " << unusedPrivateMethods.size()
         << " private methods\n";
+
+      DeclRemover remover(&unusedPrivateMethods);
+      remover.TraverseDecl(tuDecl);
+      llvm::errs() << "found " << unusedPrivateMethods.size()
+        << " unused private methods\n";
     }
 };
 
