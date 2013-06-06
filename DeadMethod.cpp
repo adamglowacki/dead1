@@ -90,6 +90,10 @@ class DeadConsumer : public ASTConsumer {
         if (dyn_cast<CXXConstructorDecl>(m))
           continue;
 
+        /* the same with dtors */
+        if (dyn_cast<CXXDestructorDecl>(m))
+          continue;
+
         PrintUnusedWarning(diags, m);
       }
     }
