@@ -8,7 +8,6 @@
 using namespace clang;
 
 namespace {
-
 typedef llvm::DenseSet<const CXXMethodDecl *> MethodSet;
 typedef llvm::DenseSet<const CXXRecordDecl *> ClassesSet;
 
@@ -64,14 +63,17 @@ class DeadConsumer : public ASTConsumer {
       /* gather lists of: not fully defined classes and the private methods */
       DeclCollector collector(&undefinedClasses, &unusedPrivateMethods);
       collector.TraverseDecl(tuDecl);
+      llvm::errs() << "undefined classes: " << undefinedClasses.size() << "\n";
+      llvm::errs() << "private methods: " << unusedPrivateMethods.size()
+        << "\n";
 
       DeclRemover remover(&unusedPrivateMethods);
       remover.TraverseDecl(tuDecl);
 
-      WarnUndefined(ctx, &undefinedClasses, &unusedPrivateMethods);
+      WarnUnused(ctx, &undefinedClasses, &unusedPrivateMethods);
     }
   private:
-    void WarnUndefined(ASTContext &ctx, ClassesSet *undefined,
+    void WarnUnused(ASTContext &ctx, ClassesSet *undefined,
         MethodSet *unused) {
       DiagnosticsEngine &diags = ctx.getDiagnostics();
 
@@ -79,15 +81,20 @@ class DeadConsumer : public ASTConsumer {
           I != E; ++I) {
         const CXXMethodDecl *m = *I;
         const CXXRecordDecl *r = m->getCanonicalDecl()->getParent();
+
+        /* care only about fully defined classes */
         if (undefined->find(r) != undefined->end())
           continue;
 
-        PrintWarning(diags, r, m);
+        /* some people declare private never used ctors purposefully */
+        if (dyn_cast<CXXConstructorDecl>(m))
+          continue;
+
+        PrintUnusedWarning(diags, m);
       }
     }
 
-    void PrintWarning(DiagnosticsEngine &diags, const CXXRecordDecl *r,
-        const CXXMethodDecl *m) {
+    void PrintUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
       unsigned diagId = diags.getCustomDiagID(DiagnosticsEngine::Warning,
           "private method %0 seems to be unused");
       diags.Report(m->getLocation(), diagId) << m->getQualifiedNameAsString();
@@ -107,7 +114,6 @@ class DeadAction : public PluginASTAction {
       return true;
     }
 };
-
 }
 
 static FrontendPluginRegistry::Add<DeadAction>
