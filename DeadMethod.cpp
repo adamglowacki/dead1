@@ -80,7 +80,7 @@ class DeadConsumer : public ASTConsumer {
       for (MethodSet::iterator I = unused->begin(), E = unused->end();
           I != E; ++I) {
         const CXXMethodDecl *m = *I;
-        const CXXRecordDecl *r = m->getCanonicalDecl()->getParent();
+        const CXXRecordDecl *r = m->getParent()->getCanonicalDecl();
 
         /* care only about fully defined classes */
         if (undefined->find(r) != undefined->end())
