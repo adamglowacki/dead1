@@ -53,10 +53,18 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
           || !(r = r->getCanonicalDecl()))
         return true;
 
-      if (m->getAccess() == AS_private)
-        privateMethods->insert(m);
+      // treat all template classes as completely unknown
       if (!m->isDefined())
         undefinedClasses->insert(r);
+
+      // don't care about template methods - they are too tricky
+      // we could later provide different template specializations that would
+      // use currently unused private methods
+      if (dyn_cast<ClassTemplateSpecializationDecl>(r))
+        return true;
+
+      if (m->getAccess() == AS_private)
+        privateMethods->insert(m);
       return true;
     }
   private:
