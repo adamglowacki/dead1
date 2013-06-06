@@ -18,16 +18,27 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
 
     bool VisitCallExpr(CallExpr *call) {
       const CXXMemberCallExpr *memberCall = dyn_cast<CXXMemberCallExpr>(call);
-      const CXXMethodDecl *m;
-      if (!memberCall || !(m = memberCall->getMethodDecl())
-          || !(m = m->getCanonicalDecl()))
-        return true;
+      if (memberCall)
+        FlagMethodUsed(memberCall->getMethodDecl());
 
-      unusedMethods->erase(m);
+      return true;
+    }
+
+    bool VisitDeclRefExpr(DeclRefExpr *expr) {
+      FlagMethodUsed(dyn_cast<CXXMethodDecl>(expr->getDecl()));
       return true;
     }
   private:
     MethodSet *unusedMethods;
+
+    // removes the method from the unused methods set; deals with NULL
+    // pointers as well
+    void FlagMethodUsed(CXXMethodDecl *m) {
+      if (!m || !(m = m->getCanonicalDecl()))
+        return;
+
+      unusedMethods->erase(m);
+    }
 };
 
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
@@ -60,7 +71,8 @@ class DeadConsumer : public ASTConsumer {
       ClassesSet undefinedClasses;
       TranslationUnitDecl *tuDecl = ctx.getTranslationUnitDecl();
 
-      /* gather lists of: not fully defined classes and the private methods */
+      /* gather lists of: not fully defined classes and all the private
+       * methods */
       DeclCollector collector(&undefinedClasses, &unusedPrivateMethods);
       collector.TraverseDecl(tuDecl);
       llvm::errs() << "undefined classes: " << undefinedClasses.size() << "\n";
