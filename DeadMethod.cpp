@@ -61,17 +61,36 @@ class DeadConsumer : public ASTConsumer {
       ClassesSet undefinedClasses;
       TranslationUnitDecl *tuDecl = ctx.getTranslationUnitDecl();
 
-      /* gather lists of: all methods and the private ones only */
+      /* gather lists of: not fully defined classes and the private methods */
       DeclCollector collector(&undefinedClasses, &unusedPrivateMethods);
       collector.TraverseDecl(tuDecl);
-      llvm::errs() << "found " << undefinedClasses.size() << " undefined classes\n";
-      llvm::errs() << "found " << unusedPrivateMethods.size()
-        << " private methods\n";
 
       DeclRemover remover(&unusedPrivateMethods);
       remover.TraverseDecl(tuDecl);
-      llvm::errs() << "found " << unusedPrivateMethods.size()
-        << " unused private methods\n";
+
+      WarnUndefined(ctx, &undefinedClasses, &unusedPrivateMethods);
+    }
+  private:
+    void WarnUndefined(ASTContext &ctx, ClassesSet *undefined,
+        MethodSet *unused) {
+      DiagnosticsEngine &diags = ctx.getDiagnostics();
+
+      for (MethodSet::iterator I = unused->begin(), E = unused->end();
+          I != E; ++I) {
+        const CXXMethodDecl *m = *I;
+        const CXXRecordDecl *r = m->getCanonicalDecl()->getParent();
+        if (undefined->find(r) != undefined->end())
+          continue;
+
+        PrintWarning(diags, r, m);
+      }
+    }
+
+    void PrintWarning(DiagnosticsEngine &diags, const CXXRecordDecl *r,
+        const CXXMethodDecl *m) {
+      unsigned diagId = diags.getCustomDiagID(DiagnosticsEngine::Warning,
+          "private method %0 seems to be unused");
+      diags.Report(m->getLocation(), diagId) << m->getQualifiedNameAsString();
     }
 };
 
