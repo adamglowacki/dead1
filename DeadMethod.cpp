@@ -115,21 +115,24 @@ class DeadConsumer : public ASTConsumer {
     bool IsFullyDefined(ClassesSet &undefined, const CXXRecordDecl *r) {
       if (Contains(undefined, r))
         return false;
-      for (CXXRecordDecl::friend_iterator I = r->friend_begin(),
-          E = r->friend_end(); I != E; ++I) {
-        const NamedDecl *fDecl = (*I)->getFriendDecl();
-        const FunctionDecl *fFun = dyn_cast_or_null<FunctionDecl>(fDecl);
-        const CXXRecordDecl *fRec = dyn_cast_or_null<CXXRecordDecl>(fDecl);
-
-        if (fFun) {
-          if (!fFun->getCanonicalDecl()->isDefined())
-            return false;
-        } else if (fRec) {
-          if (Contains(undefined, fRec))
-            return false;
-        }
-      }
+      if (r->hasFriends())
+        return false;
       return true;
+//      for (CXXRecordDecl::friend_iterator I = r->friend_begin(),
+//          E = r->friend_end(); I != E; ++I) {
+//        const NamedDecl *fDecl = (*I)->getFriendDecl();
+//        const FunctionDecl *fFun = dyn_cast_or_null<FunctionDecl>(fDecl);
+//        const CXXRecordDecl *fRec = dyn_cast_or_null<CXXRecordDecl>(fDecl);
+//
+//        if (fFun) {
+//          if (!fFun->getCanonicalDecl()->isDefined())
+//            return false;
+//        } else if (fRec) {
+//          if (Contains(undefined, fRec))
+//            return false;
+//        }
+//      }
+//      return true;
     }
 
     void PrintUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
