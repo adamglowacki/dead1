@@ -12,6 +12,10 @@ typedef llvm::DenseSet<const CXXMethodDecl *> MethodSet;
 typedef llvm::DenseSet<const CXXRecordDecl *> ClassesSet;
 
 
+bool Contains(ClassesSet &set, const CXXRecordDecl *elt) {
+  return set.find(elt->getCanonicalDecl()) != set.end();
+}
+
 class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   public:
     DeclRemover(MethodSet *privateOnes) : unusedMethods(privateOnes) { }
@@ -53,15 +57,8 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
           || !(r = r->getCanonicalDecl()))
         return true;
 
-      // treat all template classes as completely unknown
       if (!m->isDefined())
         undefinedClasses->insert(r);
-
-      // don't care about template methods - they are too tricky
-      // we could later provide different template specializations that would
-      // use currently unused private methods
-      if (dyn_cast<ClassTemplateSpecializationDecl>(r))
-        return true;
 
       if (m->getAccess() == AS_private)
         privateMethods->insert(m);
@@ -90,32 +87,49 @@ class DeadConsumer : public ASTConsumer {
       DeclRemover remover(&unusedPrivateMethods);
       remover.TraverseDecl(tuDecl);
 
-      WarnUnused(ctx, &undefinedClasses, &unusedPrivateMethods);
+      WarnUnused(ctx, undefinedClasses, unusedPrivateMethods);
     }
   private:
-    void WarnUnused(ASTContext &ctx, ClassesSet *undefined,
-        MethodSet *unused) {
+    void WarnUnused(ASTContext &ctx, ClassesSet &undefined,
+        MethodSet &unused) {
       DiagnosticsEngine &diags = ctx.getDiagnostics();
 
-      for (MethodSet::iterator I = unused->begin(), E = unused->end();
+      for (MethodSet::iterator I = unused.begin(), E = unused.end();
           I != E; ++I) {
         const CXXMethodDecl *m = *I;
-        const CXXRecordDecl *r = m->getParent()->getCanonicalDecl();
 
         /* care only about fully defined classes */
-        if (undefined->find(r) != undefined->end())
+        if (!IsFullyDefined(undefined, m->getParent()))
           continue;
 
-        /* some people declare private never used ctors purposefully */
-        if (dyn_cast<CXXConstructorDecl>(m))
+        /* some people declare private never used ctors/dtors purposefully */
+        if (dyn_cast<CXXConstructorDecl>(m) || dyn_cast<CXXDestructorDecl>(m))
           continue;
-
-        /* the same with dtors */
-        if (dyn_cast<CXXDestructorDecl>(m))
-          continue;
-
+        
         PrintUnusedWarning(diags, m);
       }
+    }
+
+    // if all the class methods and its friend functions/friends' methods
+    // are defined
+    bool IsFullyDefined(ClassesSet &undefined, const CXXRecordDecl *r) {
+      if (Contains(undefined, r))
+        return false;
+      for (CXXRecordDecl::friend_iterator I = r->friend_begin(),
+          E = r->friend_end(); I != E; ++I) {
+        const NamedDecl *fDecl = (*I)->getFriendDecl();
+        const FunctionDecl *fFun = dyn_cast_or_null<FunctionDecl>(fDecl);
+        const CXXRecordDecl *fRec = dyn_cast_or_null<CXXRecordDecl>(fDecl);
+
+        if (fFun) {
+          if (!fFun->getCanonicalDecl()->isDefined())
+            return false;
+        } else if (fRec) {
+          if (Contains(undefined, fRec))
+            return false;
+        }
+      }
+      return true;
     }
 
     void PrintUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
