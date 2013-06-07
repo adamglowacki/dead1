@@ -39,23 +39,17 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   public:
     DeclRemover(MethodSet *privateOnes) : unused(privateOnes) { }
 
-    bool VisitCallExpr(CallExpr *call) {
-      const CXXMemberCallExpr *memberCall = dyn_cast<CXXMemberCallExpr>(call);
-      if (memberCall)
-        FlagMethodUsed(memberCall->getMethodDecl());
-
+    bool VisitMemberExpr(MemberExpr *e) {
+      const ValueDecl *d = e->getMemberDecl();
+      FlagMethodUsed(dyn_cast_or_null<CXXMethodDecl>(d));
       return true;
     }
 
-    bool VisitDeclRefExpr(DeclRefExpr *expr) {
-      FlagMethodUsed(dyn_cast<CXXMethodDecl>(expr->getDecl()));
-      return true;
-    }
   private:
     MethodSet *unused;
 
     // remove the method from the unused methods set; ignore NULL silently
-    void FlagMethodUsed(CXXMethodDecl *m) {
+    void FlagMethodUsed(const CXXMethodDecl *m) {
       if (!m || !(m = m->getCanonicalDecl()))
         return;
 
@@ -68,8 +62,8 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
 //  - declared private methods
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
   public:
-    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p)
-      : ctx(c), undefinedClasses(u), privateMethods(p) { }
+    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p, bool t)
+      : ctx(c), undefinedClasses(u), privateMethods(p), templates(t) { }
 
     bool VisitCXXMethodDecl(CXXMethodDecl *m) {
       const CXXRecordDecl *r;
@@ -81,7 +75,8 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
         MarkUndefined(r);
 
       if (m->getAccess() == AS_private)
-        privateMethods->insert(m);
+        if (!IsTemplated(m) || templates)
+          privateMethods->insert(m);
 
       return true;
     }
@@ -94,18 +89,28 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
       return true;
     }
   private:
+    ASTContext *ctx;
+    ClassSet *undefinedClasses;
+    MethodSet *privateMethods;
+    bool templates;
+
     void MarkUndefined(const CXXRecordDecl *r) {
       Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
     }
 
-    ASTContext *ctx;
-    ClassSet *undefinedClasses;
-    MethodSet *privateMethods;
+    bool IsTemplated(const CXXMethodDecl *m) {
+      if (m->getDescribedFunctionTemplate())
+        return true;
+      return false;
+    }
 };
 
 // deal with every translation unit separately
 class DeadConsumer : public ASTConsumer {
   public:
+    DeadConsumer(bool includeTemplateMethods)
+      : templatesAlso(includeTemplateMethods) { }
+
     virtual void HandleTranslationUnit(ASTContext &ctx) {
       MethodSet unusedPrivateMethods;
       ClassSet undefinedClasses;
@@ -114,7 +119,8 @@ class DeadConsumer : public ASTConsumer {
       // gather lists of:
       //  - not fully defined classes
       //  - all the private methods
-      DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods);
+      DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods,
+          templatesAlso);
       collector.TraverseDecl(tuDecl);
 
       DeclRemover remover(&unusedPrivateMethods);
@@ -123,6 +129,8 @@ class DeadConsumer : public ASTConsumer {
       WarnUnused(ctx, undefinedClasses, unusedPrivateMethods);
     }
   private:
+    // whether user shall be informed about (possibly) unused templated methods
+    bool templatesAlso;
     // print warnings "unused ..."
     void WarnUnused(ASTContext &ctx, ClassSet &undefined, MethodSet &unused) {
       DiagnosticsEngine &diags = ctx.getDiagnostics();
@@ -183,15 +191,42 @@ class DeadConsumer : public ASTConsumer {
 class DeadAction : public PluginASTAction {
   protected:
     ASTConsumer *CreateASTConsumer(CompilerInstance &, StringRef) {
-      return new DeadConsumer();
+      return new DeadConsumer(includeTemplateMethods);
     }
 
-    bool ParseArgs(const CompilerInstance &,
-        const std::vector<std::string>& args) {
-      if (args.size() && args[0] == "help")
-        llvm::errs() << "DeadMethod plugin: warn if fully defined classes "
-          "with unused private methods found\n";
+    bool ParseArgs(const CompilerInstance &ci,
+        const std::vector<std::string> &args) {
+      includeTemplateMethods = false;
+      bool showHelp = false;
+
+      DiagnosticsEngine &diags = ci.getDiagnostics();
+      for (unsigned i = 0, e = args.size(); i != e; ++i)
+        if (args[i] == "include-template-methods")
+          includeTemplateMethods = true;
+        else if (args[i] == "help")
+          showHelp = true;
+        else {
+          MakeArgumentError(diags, args[i]);
+          return false;
+        }
+
+      if (showHelp)
+        ShowHelp();
       return true;
+    }
+  private:
+    bool includeTemplateMethods;
+    void MakeArgumentError(DiagnosticsEngine &diags, std::string arg) {
+      unsigned diagId = diags.getCustomDiagID(DiagnosticsEngine::Error,
+          "invalid argument '" + arg + "'");
+      diags.Report(diagId);
+    }
+    void ShowHelp() {
+      llvm::errs() << "DeadMethod plugin: warn if fully defined classes "
+        "with unused private methods found\n"
+        "Available arguments:\n"
+        "  help                      print this message\n"
+        "  include-template-methods  look for template methods as well\n";
     }
 };
 }
