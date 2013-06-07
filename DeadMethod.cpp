@@ -1,3 +1,10 @@
+// Clang plugin: dead-method
+// Author: Adam Głowacki
+//
+// Detects unused private methods in classes and prints warnings. Omits
+// classes that are not fully defined in the current translation unit and
+// these whose friends are not defined here.
+//
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/AST.h"
@@ -8,14 +15,25 @@
 using namespace clang;
 
 namespace {
+
 typedef llvm::DenseSet<const CXXMethodDecl *> MethodSet;
-typedef llvm::DenseSet<const CXXRecordDecl *> ClassesSet;
+typedef llvm::DenseSet<const Type *> ClassSet;
 
-
-bool Contains(ClassesSet &set, const CXXRecordDecl *elt) {
-  return set.find(elt->getCanonicalDecl()) != set.end();
+// set manipulation functions
+bool Contains(ASTContext &ctx, ClassSet &set, const QualType elt) {
+  const Type *t = ctx.getCanonicalType(elt).getTypePtrOrNull();
+  if (!t)
+    return false;
+  return set.find(t) != set.end();
 }
 
+void Insert(ASTContext &ctx, ClassSet &set, const QualType elt) {
+  const Type *t = ctx.getCanonicalType(elt).getTypePtrOrNull();
+  if (t)
+    set.insert(t);
+}
+
+// mark off the used methods
 class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   public:
     DeclRemover(MethodSet *privateOnes) : unusedMethods(privateOnes) { }
@@ -35,7 +53,7 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   private:
     MethodSet *unusedMethods;
 
-    // removes the method from the unused methods set; deals with NULL
+    // remove the method from the unused methods set; deals with NULL
     // pointers as well
     void FlagMethodUsed(CXXMethodDecl *m) {
       if (!m || !(m = m->getCanonicalDecl()))
@@ -45,10 +63,13 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
     }
 };
 
+// gather:
+//  - classes with undefined methods
+//  - declared private methods
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
   public:
-    DeclCollector(ClassesSet *undefined, MethodSet *privateOnes)
-      : undefinedClasses(undefined), privateMethods(privateOnes) { }
+    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p)
+      : ctx(c), undefinedClasses(u), privateMethods(p) { }
 
     bool VisitDecl(Decl *d) {
       const CXXMethodDecl *m = dyn_cast<CXXMethodDecl>(d);
@@ -58,27 +79,30 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
         return true;
 
       if (!m->isDefined())
-        undefinedClasses->insert(r);
+        Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
 
       if (m->getAccess() == AS_private)
         privateMethods->insert(m);
       return true;
     }
   private:
-    ClassesSet *undefinedClasses;
+    ASTContext *ctx;
+    ClassSet *undefinedClasses;
     MethodSet *privateMethods;
 };
 
+// deal with every translation unit separately
 class DeadConsumer : public ASTConsumer {
   public:
     virtual void HandleTranslationUnit(ASTContext &ctx) {
       MethodSet unusedPrivateMethods;
-      ClassesSet undefinedClasses;
+      ClassSet undefinedClasses;
       TranslationUnitDecl *tuDecl = ctx.getTranslationUnitDecl();
 
-      /* gather lists of: not fully defined classes and all the private
-       * methods */
-      DeclCollector collector(&undefinedClasses, &unusedPrivateMethods);
+      // gather lists of:
+      //  - not fully defined classes
+      //  - all the private methods
+      DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods);
       collector.TraverseDecl(tuDecl);
       llvm::errs() << "undefined classes: " << undefinedClasses.size() << "\n";
       llvm::errs() << "private methods: " << unusedPrivateMethods.size()
@@ -90,19 +114,19 @@ class DeadConsumer : public ASTConsumer {
       WarnUnused(ctx, undefinedClasses, unusedPrivateMethods);
     }
   private:
-    void WarnUnused(ASTContext &ctx, ClassesSet &undefined,
-        MethodSet &unused) {
+    // print warnings "unused ..."
+    void WarnUnused(ASTContext &ctx, ClassSet &undefined, MethodSet &unused) {
       DiagnosticsEngine &diags = ctx.getDiagnostics();
 
       for (MethodSet::iterator I = unused.begin(), E = unused.end();
           I != E; ++I) {
         const CXXMethodDecl *m = *I;
 
-        /* care only about fully defined classes */
-        if (!IsFullyDefined(undefined, m->getParent()))
+        // care only about fully defined classes
+        if (!IsDefinedWithFriends(ctx, undefined, m->getParent()))
           continue;
 
-        /* some people declare private never used ctors/dtors purposefully */
+        // some people declare private never used ctors/dtors purposefully
         if (dyn_cast<CXXConstructorDecl>(m) || dyn_cast<CXXDestructorDecl>(m))
           continue;
         
@@ -110,26 +134,48 @@ class DeadConsumer : public ASTConsumer {
       }
     }
 
-    // if all the class methods and its friend functions/friends' methods
-    // are defined
-    bool IsFullyDefined(ClassesSet &undefined, const CXXRecordDecl *r) {
-      if (Contains(undefined, r))
+    // if the class is defined and its friend functions/friend classes' methods
+    // are all defined
+    bool IsDefinedWithFriends(ASTContext &ctx, ClassSet &undefined,
+        const CXXRecordDecl *r) {
+      if (!IsDefined(ctx, undefined, r))
         return false;
+
+      // whether all friends are defined
       for (CXXRecordDecl::friend_iterator I = r->friend_begin(),
           E = r->friend_end(); I != E; ++I) {
+        // it may be a function...
         const NamedDecl *fDecl = (*I)->getFriendDecl();
         const FunctionDecl *fFun = dyn_cast_or_null<FunctionDecl>(fDecl);
-        const CXXRecordDecl *fRec = dyn_cast_or_null<CXXRecordDecl>(fDecl);
+        // ...or a type
+        const TypeSourceInfo *fInfo = (*I)->getFriendType();
+        const Type *fType;
 
         if (fFun) {
           if (!fFun->getCanonicalDecl()->isDefined())
             return false;
-        } else if (fRec) {
-          if (Contains(undefined, fRec))
+        } else if (fInfo && (fType = fInfo->getType().getTypePtrOrNull())) {
+          const CXXRecordDecl *fRec = fType->getPointeeCXXRecordDecl();
+
+          if (fRec && !IsDefined(ctx, undefined, fRec))
             return false;
         }
       }
       return true;
+    }
+
+    // if the class has body definition and all the class methods are defined
+    bool IsDefined(ASTContext &ctx, ClassSet &undefined,
+        const CXXRecordDecl *r) {
+      // if the user just declared the class existence and provided no body,
+      // then we haven't marked it as undefined yet
+      if (!r->hasDefinition())
+        return false;
+
+      llvm::errs() << "asked if defined: " << r->getName() << "\n";
+
+      // check in the set of undefined
+      return !Contains(ctx, undefined, ctx.getRecordType(r));
     }
 
     void PrintUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
@@ -139,11 +185,13 @@ class DeadConsumer : public ASTConsumer {
     }
 };
 
+// main plugin action
 class DeadAction : public PluginASTAction {
   protected:
     ASTConsumer *CreateASTConsumer(CompilerInstance &, StringRef) {
       return new DeadConsumer();
     }
+
     bool ParseArgs(const CompilerInstance &,
         const std::vector<std::string>& args) {
       if (args.size() && args[0] == "help")
