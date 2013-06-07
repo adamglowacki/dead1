@@ -45,6 +45,11 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
       return true;
     }
 
+    bool VisitDeclRefExpr(DeclRefExpr *e) {
+      FlagMethodUsed(dyn_cast_or_null<CXXMethodDecl>(e->getDecl()));
+      return true;
+    }
+
   private:
     MethodSet *unused;
 
