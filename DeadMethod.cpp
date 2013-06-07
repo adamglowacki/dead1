@@ -1,9 +1,10 @@
+//
 // Clang plugin: dead-method
 // Author: Adam Głowacki
-//
-// Detects unused private methods in classes and prints warnings. Omits
-// classes that are not fully defined in the current translation unit and
-// these whose friends are not defined here.
+// ----------------------------------------------------------------------------
+// Detects unused private methods in classes. Omits classes that are not fully
+// defined in the current translation unit and these whose friends are not
+// defined here.
 //
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/AST/ASTConsumer.h"
@@ -36,7 +37,7 @@ void Insert(ASTContext &ctx, ClassSet &set, const QualType elt) {
 // mark off the used methods
 class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   public:
-    DeclRemover(MethodSet *privateOnes) : unusedMethods(privateOnes) { }
+    DeclRemover(MethodSet *privateOnes) : unused(privateOnes) { }
 
     bool VisitCallExpr(CallExpr *call) {
       const CXXMemberCallExpr *memberCall = dyn_cast<CXXMemberCallExpr>(call);
@@ -51,15 +52,14 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
       return true;
     }
   private:
-    MethodSet *unusedMethods;
+    MethodSet *unused;
 
-    // remove the method from the unused methods set; deals with NULL
-    // pointers as well
+    // remove the method from the unused methods set; ignore NULL silently
     void FlagMethodUsed(CXXMethodDecl *m) {
       if (!m || !(m = m->getCanonicalDecl()))
         return;
 
-      unusedMethods->erase(m);
+      unused->erase(m);
     }
 };
 
@@ -71,21 +71,33 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
     DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p)
       : ctx(c), undefinedClasses(u), privateMethods(p) { }
 
-    bool VisitDecl(Decl *d) {
-      const CXXMethodDecl *m = dyn_cast<CXXMethodDecl>(d);
+    bool VisitCXXMethodDecl(CXXMethodDecl *m) {
       const CXXRecordDecl *r;
-      if (!m || !(m = m->getCanonicalDecl()) || !(r = m->getParent())
-          || !(r = r->getCanonicalDecl()))
+      m = m->getCanonicalDecl();
+      if (!m || !(r = m->getParent()) || !(r = r->getCanonicalDecl()))
         return true;
 
       if (!m->isDefined())
-        Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
+        MarkUndefined(r);
 
       if (m->getAccess() == AS_private)
         privateMethods->insert(m);
+
+      return true;
+    }
+
+    bool VisitCXXRecordDecl(CXXRecordDecl *r) {
+      r = r->getCanonicalDecl();
+      if (r && !r->hasDefinition())
+        MarkUndefined(r);
+
       return true;
     }
   private:
+    void MarkUndefined(const CXXRecordDecl *r) {
+      Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
+    }
+
     ASTContext *ctx;
     ClassSet *undefinedClasses;
     MethodSet *privateMethods;
@@ -104,9 +116,6 @@ class DeadConsumer : public ASTConsumer {
       //  - all the private methods
       DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods);
       collector.TraverseDecl(tuDecl);
-      llvm::errs() << "undefined classes: " << undefinedClasses.size() << "\n";
-      llvm::errs() << "private methods: " << unusedPrivateMethods.size()
-        << "\n";
 
       DeclRemover remover(&unusedPrivateMethods);
       remover.TraverseDecl(tuDecl);
@@ -123,22 +132,22 @@ class DeadConsumer : public ASTConsumer {
         const CXXMethodDecl *m = *I;
 
         // care only about fully defined classes
-        if (!IsDefinedWithFriends(ctx, undefined, m->getParent()))
+        if (!IsDefined(ctx, undefined, m->getParent()))
           continue;
 
         // some people declare private never used ctors/dtors purposefully
         if (dyn_cast<CXXConstructorDecl>(m) || dyn_cast<CXXDestructorDecl>(m))
           continue;
         
-        PrintUnusedWarning(diags, m);
+        MakeUnusedWarning(diags, m);
       }
     }
 
     // if the class is defined and its friend functions/friend classes' methods
     // are all defined
-    bool IsDefinedWithFriends(ASTContext &ctx, ClassSet &undefined,
+    bool IsDefined(ASTContext &ctx, ClassSet &undefined,
         const CXXRecordDecl *r) {
-      if (!IsDefined(ctx, undefined, r))
+      if (Contains(ctx, undefined, ctx.getRecordType(r)))
         return false;
 
       // whether all friends are defined
@@ -147,38 +156,23 @@ class DeadConsumer : public ASTConsumer {
         // it may be a function...
         const NamedDecl *fDecl = (*I)->getFriendDecl();
         const FunctionDecl *fFun = dyn_cast_or_null<FunctionDecl>(fDecl);
-        // ...or a type
-        const TypeSourceInfo *fInfo = (*I)->getFriendType();
-        const Type *fType;
-
         if (fFun) {
           if (!fFun->getCanonicalDecl()->isDefined())
             return false;
-        } else if (fInfo && (fType = fInfo->getType().getTypePtrOrNull())) {
-          const CXXRecordDecl *fRec = fType->getPointeeCXXRecordDecl();
+        }
 
-          if (fRec && !IsDefined(ctx, undefined, fRec))
+        // ...or a type
+        const TypeSourceInfo *fInfo = (*I)->getFriendType();
+        if (fInfo) {
+          if (Contains(ctx, undefined,  fInfo->getType()))
             return false;
         }
       }
+      // nothing suspicious found
       return true;
     }
 
-    // if the class has body definition and all the class methods are defined
-    bool IsDefined(ASTContext &ctx, ClassSet &undefined,
-        const CXXRecordDecl *r) {
-      // if the user just declared the class existence and provided no body,
-      // then we haven't marked it as undefined yet
-      if (!r->hasDefinition())
-        return false;
-
-      llvm::errs() << "asked if defined: " << r->getName() << "\n";
-
-      // check in the set of undefined
-      return !Contains(ctx, undefined, ctx.getRecordType(r));
-    }
-
-    void PrintUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
+    void MakeUnusedWarning(DiagnosticsEngine &diags, const CXXMethodDecl *m) {
       unsigned diagId = diags.getCustomDiagID(DiagnosticsEngine::Warning,
           "private method %0 seems to be unused");
       diags.Report(m->getLocation(), diagId) << m->getQualifiedNameAsString();
@@ -202,5 +196,6 @@ class DeadAction : public PluginASTAction {
 };
 }
 
+// register the plugin
 static FrontendPluginRegistry::Add<DeadAction>
 X("dead-method", "look for unused private methods");
