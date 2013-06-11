@@ -38,7 +38,7 @@ void Insert(ASTContext &ctx, ClassSet &set, const QualType elt) {
 // mark off the used methods
 class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
   public:
-    DeclRemover(MethodSet *privateOnes) : unused(privateOnes) { }
+    DeclRemover(MethodSet &privateOnes) : unused(privateOnes) { }
 
     bool VisitMemberExpr(MemberExpr *e) {
       const ValueDecl *d = e->getMemberDecl();
@@ -52,14 +52,14 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
     }
 
   private:
-    MethodSet *unused;
+    MethodSet &unused;
 
     // remove the method from the unused methods set; ignore NULL silently
     void FlagMethodUsed(const CXXMethodDecl *m) {
       if (!m || !(m = m->getCanonicalDecl()))
         return;
 
-      unused->erase(m);
+      unused.erase(m);
     }
 };
 
@@ -68,8 +68,8 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
 //  - declared private methods
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
   public:
-    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p, bool t,
-        FileList b)
+    DeclCollector(ASTContext &c, ClassSet &u, MethodSet &p, bool t,
+        FileList &b)
       : ctx(c), undefinedClasses(u), privateMethods(p), templates(t),
       blacklist(b) { }
 
@@ -94,7 +94,7 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
       if (IsBlacklisted(m))
         return true;
 
-      privateMethods->insert(m);
+      privateMethods.insert(m);
 
       return true;
     }
@@ -107,14 +107,14 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
       return true;
     }
   private:
-    ASTContext *ctx;
-    ClassSet *undefinedClasses;
-    MethodSet *privateMethods;
+    ASTContext &ctx;
+    ClassSet &undefinedClasses;
+    MethodSet &privateMethods;
     bool templates;
-    FileList blacklist;
+    FileList &blacklist;
 
     void MarkUndefined(const CXXRecordDecl *r) {
-      Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
+      Insert(ctx, undefinedClasses, ctx.getRecordType(r));
     }
 
     bool IsTemplated(const CXXMethodDecl *m) {
@@ -124,7 +124,7 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
     }
 
     bool IsBlacklisted(const CXXMethodDecl *m) {
-      const SourceManager &srcManager = ctx->getSourceManager();
+      const SourceManager &srcManager = ctx.getSourceManager();
       const SourceLocation loc = m->getLocation();
       const std::string file = srcManager.getPresumedLoc(loc).getFilename();
       FileList::const_iterator it = std::lower_bound(blacklist.begin(),
@@ -147,11 +147,11 @@ class DeadConsumer : public ASTConsumer {
       // gather lists of:
       //  - not fully defined classes
       //  - all the private methods
-      DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods,
+      DeclCollector collector(ctx, undefinedClasses, unusedPrivateMethods,
           templatesAlso, blacklist);
       collector.TraverseDecl(tuDecl);
 
-      DeclRemover remover(&unusedPrivateMethods);
+      DeclRemover remover(unusedPrivateMethods);
       remover.TraverseDecl(tuDecl);
 
       WarnUnused(ctx, undefinedClasses, unusedPrivateMethods);
@@ -248,10 +248,6 @@ class DeadAction : public PluginASTAction {
         ShowHelp();
       std::sort(blacklist.begin(), blacklist.end());
       std::unique(blacklist.begin(), blacklist.end());
-//      llvm::outs() << "blacklisted" << "\n";
-//      for (auto elt : fileBlacklist)
-//        llvm::outs() << " - " << elt << "\n";
-//      llvm::outs() << "end of blacklisted\n";
       return true;
     }
   private:
