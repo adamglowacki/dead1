@@ -11,7 +11,8 @@ First download LLVM/Clang sources (version 3.2). Then
     mkdir dead-method
     cd dead-method
 
-and copy all the files here. Issue inside the `dead-method` directory
+and copy all the files here. After building the whole LLVM with Clang, issue
+inside the `dead-method` directory
 
     make
 
