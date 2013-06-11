@@ -38,15 +38,15 @@ The currently accepted arguments:
 
  * `include-template-methods` - try to find unused private template methods
    also (many false-positives)
- * `ignore <file path>` - do not warn about unused methods declared in `<file path`;
+ * `ignore <file path>` - do not warn about unused methods declared in `<file path>`;
    it must be the exact path as used by the compiler
  * `help` - you will probably guess what it causes
 
 I suggest you first run the compiler+plugin without `ignore` flag and later
 copy/paste the unwanted paths from warnings.
-Remember to provide `-Xclang` before _every_ parameter that is to be passed to
-Clang and `-plugin-arg-dead-method` before _every_ plugin argument. Example
-that would ignore header file `/usr/include/bla.h`
+Remember to provide `-Xclang` before __every__ parameter that is to be passed
+to Clang and `-plugin-arg-dead-method` before __every__ plugin argument.
+Example that would ignore header file `/usr/include/bla.h`
 
     clang -Xclang -load -Xclang libDeadMethod.so -Xclang -add-plugin -Xclang dead-method -Xclang -plugin-arg-dead-method -Xclang ignore -Xclang -plugin-arg-dead-method -Xclang /usr/include/bla.h a.cpp
 
