@@ -19,6 +19,7 @@ namespace {
 
 typedef llvm::DenseSet<const CXXMethodDecl *> MethodSet;
 typedef llvm::DenseSet<const Type *> ClassSet;
+typedef std::vector<std::string> FileList;
 
 // set manipulation functions
 bool Contains(ASTContext &ctx, ClassSet &set, const QualType elt) {
@@ -67,8 +68,10 @@ class DeclRemover : public RecursiveASTVisitor<DeclRemover> {
 //  - declared private methods
 class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
   public:
-    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p, bool t)
-      : ctx(c), undefinedClasses(u), privateMethods(p), templates(t) { }
+    DeclCollector(ASTContext *c, ClassSet *u, MethodSet *p, bool t,
+        FileList b)
+      : ctx(c), undefinedClasses(u), privateMethods(p), templates(t),
+      blacklist(b) { }
 
     bool VisitCXXMethodDecl(CXXMethodDecl *m) {
       const CXXRecordDecl *r;
@@ -79,9 +82,19 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
       if (!m->isDefined())
         MarkUndefined(r);
 
-      if (m->getAccess() == AS_private)
-        if (!IsTemplated(m) || templates)
-          privateMethods->insert(m);
+      // only private methods are concerned
+      if (m->getAccess() != AS_private)
+        return true;
+
+      // omit template methods if flag on
+      if (IsTemplated(m) && !templates)
+        return true;
+
+      // omit blacklist entries
+      if (IsBlacklisted(m))
+        return true;
+
+      privateMethods->insert(m);
 
       return true;
     }
@@ -98,6 +111,7 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
     ClassSet *undefinedClasses;
     MethodSet *privateMethods;
     bool templates;
+    FileList blacklist;
 
     void MarkUndefined(const CXXRecordDecl *r) {
       Insert(*ctx, *undefinedClasses, ctx->getRecordType(r));
@@ -108,13 +122,22 @@ class DeclCollector : public RecursiveASTVisitor<DeclCollector> {
         return true;
       return false;
     }
+
+    bool IsBlacklisted(const CXXMethodDecl *m) {
+      const SourceManager &srcManager = ctx->getSourceManager();
+      const SourceLocation loc = m->getLocation();
+      const std::string file = srcManager.getPresumedLoc(loc).getFilename();
+      FileList::const_iterator it = std::lower_bound(blacklist.begin(),
+          blacklist.end(), file);
+      return it != blacklist.end() && *it == file;
+    }
 };
 
 // deal with every translation unit separately
 class DeadConsumer : public ASTConsumer {
   public:
-    DeadConsumer(bool includeTemplateMethods)
-      : templatesAlso(includeTemplateMethods) { }
+    DeadConsumer(bool includeTemplateMethods, FileList ignored)
+      : templatesAlso(includeTemplateMethods), blacklist(ignored) { }
 
     virtual void HandleTranslationUnit(ASTContext &ctx) {
       MethodSet unusedPrivateMethods;
@@ -125,7 +148,7 @@ class DeadConsumer : public ASTConsumer {
       //  - not fully defined classes
       //  - all the private methods
       DeclCollector collector(&ctx, &undefinedClasses, &unusedPrivateMethods,
-          templatesAlso);
+          templatesAlso, blacklist);
       collector.TraverseDecl(tuDecl);
 
       DeclRemover remover(&unusedPrivateMethods);
@@ -136,6 +159,9 @@ class DeadConsumer : public ASTConsumer {
   private:
     // whether user shall be informed about (possibly) unused templated methods
     bool templatesAlso;
+    // sorted list of file paths that should be ignored when warning about
+    // unused methods
+    FileList blacklist;
     // print warnings "unused ..."
     void WarnUnused(ASTContext &ctx, ClassSet &undefined, MethodSet &unused) {
       DiagnosticsEngine &diags = ctx.getDiagnostics();
@@ -196,7 +222,7 @@ class DeadConsumer : public ASTConsumer {
 class DeadAction : public PluginASTAction {
   protected:
     ASTConsumer *CreateASTConsumer(CompilerInstance &, StringRef) {
-      return new DeadConsumer(includeTemplateMethods);
+      return new DeadConsumer(includeTemplateMethods, blacklist);
     }
 
     bool ParseArgs(const CompilerInstance &ci,
@@ -210,22 +236,34 @@ class DeadAction : public PluginASTAction {
           includeTemplateMethods = true;
         else if (args[i] == "help")
           showHelp = true;
-        else {
+        else if (args[i] == "ignore" && i + 1 != e) {
+          ++i;
+          blacklist.push_back(args[i]);
+        } else {
           MakeArgumentError(diags, args[i]);
           return false;
         }
 
       if (showHelp)
         ShowHelp();
+      std::sort(blacklist.begin(), blacklist.end());
+      std::unique(blacklist.begin(), blacklist.end());
+//      llvm::outs() << "blacklisted" << "\n";
+//      for (auto elt : fileBlacklist)
+//        llvm::outs() << " - " << elt << "\n";
+//      llvm::outs() << "end of blacklisted\n";
       return true;
     }
   private:
     bool includeTemplateMethods;
+    FileList blacklist;
+
     void MakeArgumentError(DiagnosticsEngine &diags, std::string arg) {
       unsigned diagId = diags.getCustomDiagID(DiagnosticsEngine::Error,
           "invalid argument '" + arg + "'");
       diags.Report(diagId);
     }
+
     void ShowHelp() {
       llvm::errs() << "DeadMethod plugin: warn if fully defined classes "
         "with unused private methods found\n"
